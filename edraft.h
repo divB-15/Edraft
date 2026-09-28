@@ -3,9 +3,9 @@
 //
 //  模块划分：
 //    main.cpp   程序入口、主窗口过程（消息分发、鼠标/键盘交互）
-//    model.cpp  数据模型与几何：对象查找、箭头路由、包围盒、命中检测、撤销重做
-//    render.cpp 绘制：对象、网格、选中框、顶部栏目与功能区（含自绘按钮）
-//    io.cpp     持久化与输入输出：.edraft 读写、图片编解码、剪贴板、PNG 导出
+//    model.cpp  数据模型与几何：对象查找、箭头路由、包围盒、命中检测、撤销重做、视图
+//    render.cpp 绘制：对象、网格、选中框、顶部栏目与功能区（含自绘按钮与横/纵排布）
+//    io.cpp     持久化与输入输出：.edraft 读写、图片编解码、剪贴板、PNG 导出、新建文档
 //    ui.cpp     交互控件：文本框就地编辑、自定义数值输入框、右键菜单、工具栏逻辑
 // ============================================================================
 #pragma once
@@ -43,6 +43,7 @@ using std::wstring;
 inline constexpr double MIN_SIZE = 24.0;                  // 对象最小尺寸（世界坐标）
 inline constexpr const wchar_t* FONT_NAME  = L"Microsoft YaHei";   // 界面与正文默认字体
 inline constexpr const wchar_t* APP_NAME   = L"Edraft";            // 程序名
+inline constexpr const wchar_t* APP_VER    = L"1.1.0.0";           // 版本号（须与 app.rc 的 FILEVERSION 一致）
 inline constexpr const wchar_t* FILE_EXT   = L"edraft";            // 存档扩展名（只认这一种）
 inline constexpr const wchar_t* FILE_HDR   = L"EDRAFT3";           // 存档文件头（含线型/折弯字段）
 inline constexpr const wchar_t* FILE_FLT   = L"Edraft 文件 (*.edraft)\0*.edraft\0";
@@ -60,11 +61,13 @@ enum class Drag { None, Pan, Move, Resize, NewRect, NewText, NewArrow, Marquee }
 // 工具栏按钮命令 ID
 enum {
     IDB_SELECT = 1001, IDB_RECT, IDB_TEXT, IDB_ARROW, IDB_IMAGE,
-    IDB_OPEN, IDB_SAVE, IDB_SAVEAS, IDB_EXPORT, IDB_DEL,
+    IDB_NEW, IDB_OPEN, IDB_SAVE, IDB_SAVEAS, IDB_EXPORT, IDB_DEL,
     IDB_UNDO, IDB_REDO, IDB_FIT, IDB_HOME,
-    IDB_PANMODE = 1015,      // 空白拖动缺省 = 平移
+    IDB_PANMODE,             // 空白拖动缺省 = 平移
     IDB_SELMODE,             // 空白拖动缺省 = 框选
     IDB_GRID,                // 网格开关
+    IDB_TOPMOST,             // 窗口总是置顶
+    IDB_TBV,                 // 功能区横排 / 竖排切换
     IDC_EDIT = 1100          // 文本框就地编辑用的 EDIT 子窗口
 };
 
@@ -80,7 +83,9 @@ enum {
     IDM_IMG_ORIG = 2060,                       // 图片恢复原始像素
     IDM_HOME = 2070, IDM_FIT2, IDM_GRIDM,      // 画布空白处菜单
     IDM_SW_BASE   = 2080,                      // +0..4  预设线宽
-    IDM_SW_CUSTOM = 2090                       // 自定义线宽
+    IDM_SW_CUSTOM = 2090,                      // 自定义线宽
+    IDM_FITOBJ    = 2100, IDM_EXPFITOBJ,       // 适应到方框 / 适应方框导出图片
+    IDM_NEWDOC    = 2110, IDM_TOPM, IDM_TBVM   // 画布菜单：新建 / 总是置顶 / 排向
 };
 
 // 手柄编号：0..3 四角，4..7 四边中点，8/9 箭头两端点，10 折线折点，11 方框移动手柄
@@ -129,6 +134,7 @@ inline constexpr BtnDef BTNS[] = {
     { IDB_UNDO,    L"撤销",   50, G_EDIT, false },
     { IDB_REDO,    L"重做",   50, G_EDIT, false },
     { IDB_DEL,     L"删除",   50, G_EDIT, false },
+    { IDB_NEW,     L"新建",   48, G_FILE, false },
     { IDB_OPEN,    L"打开",   48, G_FILE, false },
     { IDB_SAVE,    L"保存",   48, G_FILE, false },
     { IDB_SAVEAS,  L"另存为", 58, G_FILE, false },
@@ -136,8 +142,22 @@ inline constexpr BtnDef BTNS[] = {
     { IDB_FIT,     L"适应",   50, G_VIEW, false },
     { IDB_HOME,    L"原点",   50, G_VIEW, false },
     { IDB_GRID,    L"网格",   50, G_VIEW, true  },
+    { IDB_TOPMOST, L"置顶",   50, G_VIEW, true  },   // 窗口总是置顶
+    { IDB_TBV,     L"竖排",   50, G_VIEW, false },   // 标题由 LayoutToolbar 按当前方向改写
 };
 inline constexpr int NBTN = (int)(sizeof(BTNS) / sizeof(BTNS[0]));
+
+// ---------------------------------------------------------- 功能区的两种排布
+// 横向（默认）：顶栏下面一整条，按钮自左向右。程序窗口较宽时最省地方。
+// 纵向：按钮排成左侧一列，宽度只占一条（g_ribW），窗口较窄时也能显示全部按钮。
+// 两种情况下画布区左上角都由 (g_cvX, g_cvY) 给出，其余代码一律只看这两个值。
+inline constexpr int TB_BTN_H  = 28;    // 横向：按钮高度
+inline constexpr int TB_VMIN_H = 17;    // 纵向：按钮高度下限（再低文字就顶出按钮了）
+inline constexpr int TB_VMAX_H = 26;    // 纵向：按钮高度上限
+inline constexpr int TB_VLBL_H = 15;    // 纵向：分组标题行高
+inline constexpr int TB_RIB_W  = 92;    // 纵向：整条功能区的宽度
+inline constexpr double TB_HSHRINK = 0.62; // 横排：窗口不够宽时按钮最多压窄到 62%
+                                           // （再窄就只能换竖排；画布菜单里也有切换项）
 
 // ------------------------------------------------------------------ 数据模型
 struct Obj {
@@ -191,7 +211,12 @@ extern int                 g_emptyMode;               // 空白左键拖动：0=
 extern vector<int>         g_sels;                    // 当前选中的对象 id 集合（支持多选）
 
 extern double              g_dpi, g_dpiScale;         // 系统 DPI 与缩放系数
-extern int                 g_bandH, g_ribH, g_tbH;    // 顶部栏目 / 功能区 / 合计高度
+extern int                 g_bandH, g_ribH, g_tbH;    // 顶部栏目 / 功能区 / 合计高度（横向时）
+extern int                 g_ribW;                    // 功能区纵向排布时的宽度
+extern bool                g_tbVert;                  // 功能区是否竖排（false = 顶部横排）
+extern int                 g_cvX, g_cvY;              // 画布区左上角（客户区坐标）
+extern int                 g_vLblH;                   // 竖排时分组标题行高（由 LayoutToolbar 定）
+extern bool                g_topmost;                 // 窗口是否总是置顶
 extern HFONT               g_uiFont;
 
 extern Drag                g_drag;
@@ -216,7 +241,8 @@ extern bool                g_dirty;
 extern vector<vector<Obj>> g_undo, g_redo;
 extern ULONG_PTR           g_gdiToken;
 
-extern int                 g_gx0[NGROUP], g_gx1[NGROUP];   // 各分组横向范围
+extern int                 g_gx0[NGROUP], g_gx1[NGROUP];   // 横排时各分组横向范围
+extern int                 g_gy0[NGROUP], g_gy1[NGROUP];   // 竖排时各分组纵向范围
 
 // ------------------------------------------------------------------ 坐标变换
 // 世界坐标 ↔ 屏幕坐标。屏幕 = 世界 × 缩放 + 平移
@@ -276,14 +302,22 @@ void   UpdateUndoButtons();                              // 按栈是否为空�
 
 void   GoHome();                                         // 回到原点
 void   ZoomFit(HWND hwnd);                               // 适应窗口
+void   ZoomToBounds(HWND hwnd, double x0, double y0,     // 缩放到恰好容纳给定世界坐标矩形
+                    double x1, double y1, double marginPx);
+// 画布区（客户区去掉顶栏与功能区后剩下的那块）。返回 false 表示已被挤没
+bool   CanvasRect(HWND hwnd, int& cx, int& cy, int& cw, int& ch);
+// 当前选中对象的整体包围盒（已把线宽算进去）；ok = 是否有选中
+void   SelBounds(double& x0, double& y0, double& x1, double& y1, bool& ok);
 
 // ============================ render.cpp ============================
 void   DrawScene(Gdiplus::Graphics& g);                  // 所有对象（世界坐标变换内）
 void   DrawGrid(Gdiplus::Graphics& g, int W, int H);     // 半透明网格
 void   DrawOverlay(Gdiplus::Graphics& g);                // 选中框/手柄/锚点/预览（屏幕坐标）
 bool   ShowAnchors();                                    // 是否需要显示四边连接锚点
-void   DrawChrome(Gdiplus::Graphics& g, int W);          // 顶部栏目 + 功能区底板与组名
-void   MakeToolbar(HWND hwnd);                           // 创建自绘按钮并记下分组范围
+void   DrawChrome(Gdiplus::Graphics& g, int W, int H);   // 顶部栏目 + 功能区底板与组名
+void   MakeToolbar(HWND hwnd);                           // 创建自绘按钮（只做一次）
+void   LayoutToolbar(HWND hwnd);                         // 按当前方向摆放按钮并刷新画布原点
+void   SetToolbarVert(HWND hwnd, bool vert);             // 切换功能区横排 / 竖排
 void   RefreshButtons();                                 // 重绘所有工具栏按钮
 bool   IsBtnChecked(int id);                             // 按钮是否处于选中态
 const BtnDef* FindBtn(int id);
@@ -300,8 +334,13 @@ wstring EnsureEdraftExt(const wstring& p);
 
 bool   SaveDoc(const wstring& path);
 bool   LoadDoc(const wstring& path);
+void   NewDoc(HWND hwnd);                                // 新建：清空画布（会先问是否保存）
+bool   SaveMaybeAs(HWND hwnd);                           // 保存到当前路径，没路径就弹"另存为"
+bool   ConfirmLoseChanges(HWND hwnd);                    // 有未保存改动时询问；true = 可以继续
 void   InsertImage(HWND hwnd);
 void   ExportPNG(HWND hwnd);
+void   ExportPNGBounds(HWND hwnd, double x0, double y0,  // 只导出给定世界坐标矩形这块区域
+                       double x1, double y1, double margin, const wchar_t* defName);
 int    EncoderClsid(const WCHAR* mime, CLSID* clsid);
 void   DoPaste();                                        // Ctrl+V：文字→文本框，图片→图片
 
@@ -311,6 +350,7 @@ void   BeginEdit(int id);                                // 进入就地编辑
 void   CommitEdit();                                     // 结束就地编辑并写回
 void   MarkTool(Tool t);                                 // 切换工具并刷新按钮
 void   UpdateTitle();                                    // 标题栏显示文件名与未保存标记
+void   ToggleTopmost(HWND hwnd);                         // 切换"总是置顶"
 void   ShowContextMenu(HWND hwnd, int sx, int sy);       // 右键菜单
 void   HandleMenu(int id);                               // 处理菜单命令
 LRESULT CALLBACK InputProc(HWND h, UINT m, WPARAM w, LPARAM l);   // 自定义数值输入框

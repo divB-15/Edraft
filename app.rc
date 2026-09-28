@@ -1,1 +1,46 @@
+// ============================================================================
+//  app.rc  ——  图标资源与版本信息
+//
+//  编译（必须指定 --codepage=65001，否则本文件的 UTF-8 中文会被按 GBK 解码而乱码）：
+//      windres --codepage=65001 app.rc -O coff -o app_res.o
+//
+//  这里刻意不 #include <windows.h>：windres 的默认 include 路径不一定能找到它。
+//  因此所有关键字常量都直接写成十六进制字面量，取值来自 winver.h：
+//      VS_FFI_FILEFLAGSMASK = 0x0000003F        VOS_NT_WINDOWS32 = 0x00040004
+//      VFT_APP              = 0x00000001        VFT2_UNKNOWN     = 0x00000000
+//      FILEFLAGS 0x0 = 正式版（无 VS_FF_DEBUG / VS_FF_PRERELEASE 等位）
+//  字符串块名 "080404b0" = 语言 0x0804（简体中文）+ 代码页 1200（Unicode），
+//  两个数字各自按"低字节在前"拼写（0804→0804，04b0→1200）。
+// ============================================================================
+
 1 ICON "Edraft.ico"
+
+1 VERSIONINFO
+FILEVERSION     1,1,0,0
+PRODUCTVERSION  1,1,0,0
+FILEFLAGSMASK   0x0000003FL
+FILEFLAGS       0x00000000L
+FILEOS          0x00040004L
+FILETYPE        0x00000001L
+FILESUBTYPE     0x00000000L
+BEGIN
+    BLOCK "StringFileInfo"
+    BEGIN
+        BLOCK "080404b0"
+        BEGIN
+            VALUE "CompanyName",      "divB-15"
+            VALUE "FileDescription",  "Edraft —— 极简 Windows 电子草稿纸"
+            VALUE "FileVersion",      "1.1.0.0"
+            VALUE "InternalName",     "Edraft"
+            VALUE "LegalCopyright",   "Copyright (C) 2026 divB-15  (MIT License)"
+            VALUE "OriginalFilename", "Edraft.exe"
+            VALUE "ProductName",      "Edraft 电子草稿纸"
+            VALUE "ProductVersion",   "1.1.0.0"
+            VALUE "Comments",         "纯 Win32 API + GDI+ 实现的单文件白板程序"
+        END
+    END
+    BLOCK "VarFileInfo"
+    BEGIN
+        VALUE "Translation", 0x0804, 1200
+    END
+END

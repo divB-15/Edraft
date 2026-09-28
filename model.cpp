@@ -223,6 +223,27 @@ void ContentBounds(double& x0, double& y0, double& x1, double& y1) {
     if (x0 > x1) { x0 = y0 = 0; x1 = y1 = 100; }   // 空画布兜底
 }
 
+// 选中对象的整体包围盒。
+// 注意要把线宽算进去：边框是沿边线居中绘制的，粗线会向外溢出 strokeW/2，
+// 否则"适应到方框"会把粗边框裁掉半个，导出时也一样。
+void SelBounds(double& x0, double& y0, double& x1, double& y1, bool& ok) {
+    x0 = y0 = 1e18; x1 = y1 = -1e18; ok = false;
+    for (int sid : g_sels) {
+        Obj* o = ObjOf(sid);
+        if (!o) continue;
+        double a, b, c, d;
+        ObjBounds(*o, a, b, c, d);
+        if (o->type != OT::Arrow) {           // 箭头没有"边框"，线宽已含在折线里
+            double e = o->strokeW / 2.0;
+            a -= e; b -= e; c += e; d += e;
+        }
+        x0 = std::min(x0, a); y0 = std::min(y0, b);
+        x1 = std::max(x1, c); y1 = std::max(y1, d);
+        ok = true;
+    }
+    if (!ok) { x0 = y0 = x1 = y1 = 0; }
+}
+
 // ------------------------------------------------------------------- 命中检测
 static bool InBox(const Obj& o, double wx, double wy, double tol) {
     return wx >= o.x - tol && wx <= o.x + o.w + tol &&
@@ -400,26 +421,40 @@ void DoRedo() {
 }
 
 // ---------------------------------------------------------------------- 视图
+// 画布区 = 客户区去掉顶栏与功能区。横排时功能区在顶部，竖排时在左侧，
+// 所以这里统一由 (g_cvX, g_cvY) 给出左上角 —— 其余所有地方都只认这两个值。
+bool CanvasRect(HWND hwnd, int& cx, int& cy, int& cw, int& ch) {
+    RECT rc{ 0, 0, 0, 0 };
+    if (!hwnd || !GetClientRect(hwnd, &rc)) return false;
+    cx = g_cvX; cy = g_cvY;
+    cw = rc.right - g_cvX;
+    ch = rc.bottom - g_cvY;
+    return cw > 0 && ch > 0;
+}
+
 // 回到原点：缩放归 1，把世界坐标 (0,0) 放在画布左上角附近
 void GoHome() {
     g_scale = 1.0;
     g_panX = 40.0;
-    g_panY = g_tbH + 40.0;
+    g_panY = g_cvY + 40.0;
     InvalidateRect(g_hwnd, nullptr, FALSE);
+}
+
+// 缩放到恰好容纳给定世界坐标矩形（四周留 marginPx 像素余量）
+void ZoomToBounds(HWND hwnd, double x0, double y0, double x1, double y1, double marginPx) {
+    int cx, cy, cw, ch;
+    if (!CanvasRect(hwnd, cx, cy, cw, ch)) return;
+    double w = std::max(1.0, x1 - x0), h = std::max(1.0, y1 - y0);
+    double k = std::min((cw - 2 * marginPx) / w, (ch - 2 * marginPx) / h);
+    g_scale = std::max(0.05, std::min(8.0, k));        // 上限与滚轮缩放一致
+    g_panX = cx + (cw - w * g_scale) / 2.0 - x0 * g_scale;
+    g_panY = cy + (ch - h * g_scale) / 2.0 - y0 * g_scale;
+    InvalidateRect(hwnd, nullptr, FALSE);
 }
 // 缩放平移到刚好容纳全部内容
 void ZoomFit(HWND hwnd) {
     if (g_objs.empty()) return;
     double x0, y0, x1, y1;
     ContentBounds(x0, y0, x1, y1);
-    RECT rc; GetClientRect(hwnd, &rc);
-    int cw = rc.right - rc.left, ch = rc.bottom - rc.top - g_tbH;
-    if (cw <= 0 || ch <= 0) return;
-    double m = 40.0;
-    g_scale = std::min((cw - 2 * m) / std::max(1.0, x1 - x0),
-                       (ch - 2 * m) / std::max(1.0, y1 - y0));
-    g_scale = std::max(0.05, std::min(4.0, g_scale));
-    g_panX = (cw - (x1 - x0) * g_scale) / 2.0 - x0 * g_scale;
-    g_panY = g_tbH + (ch - (y1 - y0) * g_scale) / 2.0 - y0 * g_scale;
-    InvalidateRect(hwnd, nullptr, FALSE);
+    ZoomToBounds(hwnd, x0, y0, x1, y1, 40.0);
 }

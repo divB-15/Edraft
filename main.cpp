@@ -7,7 +7,8 @@
 //    Ctrl+空白拖动    强制框选加选
 //    空格+拖动 / 中键 平移画布        滚轮 缩放
 //    双击文本框       进入编辑        Enter / F2 也能进入
-//    右键             当前对象的设置菜单
+//    右键             当前对象的设置菜单（方框上还有"适应到方框 / 适应方框导出图片"）
+//    Ctrl+N           新建（有未保存改动会先问）
 // ============================================================================
 #include "edraft.h"
 
@@ -26,6 +27,11 @@ vector<int>         g_sels;
 
 double              g_dpi = 96.0, g_dpiScale = 1.0;
 int                 g_bandH = 28, g_ribH = 58, g_tbH = 86;   // 顶栏 / 功能区 / 合计
+int                 g_ribW = 92;                             // 功能区竖排时的宽度
+bool                g_tbVert = false;                        // 功能区方向：false = 横排
+int                 g_cvX = 0, g_cvY = 86;                   // 画布区左上角（横排缺省）
+int                 g_vLblH = 15;                            // 竖排时分组标题行高
+bool                g_topmost = false;                       // 窗口是否总是置顶
 HFONT               g_uiFont = nullptr;
 
 Drag                g_drag = Drag::None;
@@ -50,6 +56,7 @@ vector<vector<Obj>> g_undo, g_redo;
 ULONG_PTR           g_gdiToken = 0;
 
 int                 g_gx0[NGROUP], g_gx1[NGROUP];
+int                 g_gy0[NGROUP], g_gy1[NGROUP];
 
 // ============================ 自绘工具栏按钮 ============================
 // 标准 Win32 按钮改不了背景色，要按分组配色只能用 BS_OWNERDRAW 自己画。
@@ -228,6 +235,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_DRAWITEM:
         return OnDrawItem(wp, lp);
 
+    case WM_SIZE:
+        // 竖排时按钮高度要按新的可用高度重排，横排也要保证分组范围是最新的
+        LayoutToolbar(hwnd);
+        return 0;
+
     case WM_COMMAND: {
         int id = LOWORD(wp);
         if (HIWORD(wp) == EN_KILLFOCUS && id == IDC_EDIT) { CommitEdit(); return 0; }
@@ -245,11 +257,11 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         case IDB_ARROW:   MarkTool(Tool::ArrowT); break;
         case IDB_IMAGE:   MarkTool(Tool::ImageT); InsertImage(hwnd); MarkTool(Tool::Select); break;
         case IDB_GRID:    g_grid = !g_grid; RefreshButtons(); InvalidateRect(hwnd, nullptr, FALSE); break;
+        case IDB_TOPMOST: ToggleTopmost(hwnd); break;
+        case IDB_TBV:     SetToolbarVert(hwnd, !g_tbVert); break;
+        case IDB_NEW:     NewDoc(hwnd); break;
         case IDB_OPEN:  { wstring p; if (PickFile(hwnd, p, false, FILE_FLT, FILE_EXT)) LoadDoc(p); break; }
-        case IDB_SAVE:
-            if (g_file.empty()) { wstring p; if (PickFile(hwnd, p, true, FILE_FLT, FILE_EXT)) SaveDoc(p); }
-            else SaveDoc(g_file);
-            break;
+        case IDB_SAVE:    SaveMaybeAs(hwnd); break;
         case IDB_SAVEAS: { wstring p = g_file; if (PickFile(hwnd, p, true, FILE_FLT, FILE_EXT)) SaveDoc(p); break; }
         case IDB_EXPORT: ExportPNG(hwnd); break;
         case IDB_DEL:    DeleteSelected(); break;
@@ -266,7 +278,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         CommitEdit();
         SetFocus(hwnd);
         int sx = GET_X_LPARAM(lp), sy = GET_Y_LPARAM(lp);
-        if (sy < g_tbH) return 0;
+        if (sx < g_cvX || sy < g_cvY) return 0;          // 点在顶栏 / 功能区上
         bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
 
         g_sx0 = sx; g_sy0 = sy;
@@ -341,7 +353,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE: {
         int sx = GET_X_LPARAM(lp), sy = GET_Y_LPARAM(lp);
         g_mwx = S2X(sx); g_mwy = S2Y(sy);
-        g_mouseIn = (sy >= g_tbH);
+        g_mouseIn = (sx >= g_cvX && sy >= g_cvY);
 
         if (g_drag == Drag::None) {
             if (ShowAnchors()) InvalidateRect(hwnd, nullptr, FALSE);   // 锚点悬停高亮
@@ -433,7 +445,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 
     case WM_LBUTTONDBLCLK: {
         int sx = GET_X_LPARAM(lp), sy = GET_Y_LPARAM(lp);
-        if (sy < g_tbH) return 0;
+        if (sx < g_cvX || sy < g_cvY) return 0;
         int hit = HitTest(S2X(sx), S2Y(sy));
         if (hit >= 0) {
             SetSel(hit);
@@ -469,6 +481,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
             return 0;
         }
         if (ctrl && wp == 'O') { SendMessageW(hwnd, WM_COMMAND, MAKEWPARAM(IDB_OPEN, BN_CLICKED), 0); return 0; }
+        if (ctrl && wp == 'N') { NewDoc(hwnd); return 0; }
         if (ctrl && wp == 'A') {                                    // 全选
             g_sels.clear();
             for (const Obj& o : g_objs) g_sels.push_back(o.id);
@@ -505,15 +518,17 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
                 Gdiplus::SolidBrush bg(Gdiplus::Color(255, 246, 247, 249));
                 g.FillRectangle(&bg, Gdiplus::RectF(0, 0, (Gdiplus::REAL)W, (Gdiplus::REAL)H));
 
-                if (H > g_tbH) {                        // 画布区裁剪掉工具栏
-                    Gdiplus::RectF clip(0, (Gdiplus::REAL)g_tbH, (Gdiplus::REAL)W, (Gdiplus::REAL)(H - g_tbH));
+                int cw = W - g_cvX, ch = H - g_cvY;     // 画布区：横排时去掉顶栏，竖排时去掉左列
+                if (cw > 0 && ch > 0) {
+                    Gdiplus::RectF clip((Gdiplus::REAL)g_cvX, (Gdiplus::REAL)g_cvY,
+                                        (Gdiplus::REAL)cw, (Gdiplus::REAL)ch);
                     g.SetClip(clip);
                 }
                 DrawGrid(g, W, H);
                 DrawScene(g);
                 DrawOverlay(g);
                 g.ResetClip();
-                DrawChrome(g, W);                       // 工具栏画在画布之上
+                DrawChrome(g, W, H);                    // 工具栏画在画布之上
             }
             BitBlt(hdc, 0, 0, W, H, mem, 0, 0, SRCCOPY);
             SelectObject(mem, old);
@@ -527,8 +542,7 @@ static LRESULT CALLBACK WndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     // ---------------------------------------------------------- 关闭
     case WM_CLOSE: {
         CommitEdit();
-        if (g_dirty && MessageBoxW(hwnd, L"当前内容未保存，是否退出？", APP_NAME,
-                                   MB_YESNO | MB_ICONQUESTION) != IDYES) return 0;
+        if (!ConfirmLoseChanges(hwnd)) return 0;         // 未保存时问"是否先保存"
         DestroyWindow(hwnd);
         return 0;
     }
@@ -555,6 +569,9 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
         g_bandH = (int)ceil(28.0 * g_dpiScale);
         g_ribH  = (int)ceil(58.0 * g_dpiScale);
         g_tbH   = g_bandH + g_ribH;
+        g_ribW  = (int)ceil(TB_RIB_W * g_dpiScale);
+        g_cvX   = 0;                     // 缺省横排：画布区在顶栏 + 功能区之下
+        g_cvY   = g_tbH;
     }
 
     Gdiplus::GdiplusStartupInput gsi;
@@ -611,7 +628,7 @@ int WINAPI WinMain(HINSTANCE hInst, HINSTANCE, LPSTR, int nShow) {
                            0, 0, 10, 10, g_hwnd, (HMENU)(INT_PTR)IDC_EDIT, hInst, nullptr);
     ShowWindow(g_edit, SW_HIDE);
 
-    g_panY = g_tbH + 40.0;
+    g_panY = g_cvY + 40.0;
     ShowWindow(g_hwnd, nShow);
     UpdateWindow(g_hwnd);
 

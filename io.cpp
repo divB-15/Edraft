@@ -366,6 +366,48 @@ bool LoadDoc(const wstring& path) {
     return true;
 }
 
+// -------------------------------------------------------------------- 新建
+// 保存到当前路径；如果还没有路径就弹"另存为"。返回 true 表示确实写盘成功。
+bool SaveMaybeAs(HWND hwnd) {
+    if (g_file.empty()) {
+        wstring p;
+        if (!PickFile(hwnd, p, true, FILE_FLT, FILE_EXT)) return false;   // 用户取消
+        return SaveDoc(p);
+    }
+    return SaveDoc(g_file);
+}
+
+// 关闭 / 新建之前的守卫：有未保存改动就问一句。
+// 返回 true = 可以丢弃当前内容继续往下走。
+bool ConfirmLoseChanges(HWND hwnd) {
+    if (!g_dirty) return true;
+    int r = MessageBoxW(hwnd, L"当前内容有未保存的修改。\n\n是否先保存？", APP_NAME,
+                        MB_YESNOCANCEL | MB_ICONWARNING);
+    if (r == IDCANCEL) return false;
+    if (r == IDYES)    return SaveMaybeAs(hwnd);   // 保存失败或用户又取消了对话框 → 不继续
+    return true;                                   // 选择"不保存"
+}
+
+// 新建一个空白的电子草稿纸
+void NewDoc(HWND hwnd) {
+    CommitEdit();
+    if (!ConfirmLoseChanges(hwnd)) return;
+
+    g_objs.clear();
+    g_sels.clear();
+    g_undo.clear();
+    g_redo.clear();
+    g_moveOrig.clear();
+    g_editingId = -1;
+    g_nextId = 1;
+    g_file.clear();
+    g_dirty = false;
+    GoHome();                                          // 视图也一并复位
+    UpdateTitle();
+    UpdateUndoButtons();
+    InvalidateRect(hwnd, nullptr, FALSE);
+}
+
 // ------------------------------------------------------------------ PNG 编解码
 int EncoderClsid(const WCHAR* mime, CLSID* clsid) {
     UINT num = 0, size = 0;
@@ -424,9 +466,12 @@ void InsertImage(HWND hwnd) {
     double k = (iw > 480.0) ? (480.0 / iw) : 1.0;         // 过大的图等比缩小
     o.w = iw * k; o.h = ih * k;
 
-    RECT rc; GetClientRect(hwnd, &rc);
-    o.x = S2X((rc.right - rc.left) / 2.0) - o.w / 2.0;
-    o.y = S2Y(g_tbH + (rc.bottom - rc.top - g_tbH) / 2.0) - o.h / 2.0;
+    // 落在画布区中央（横排/竖排都能算对）
+    int cx, cy, cw, ch;
+    if (CanvasRect(hwnd, cx, cy, cw, ch)) {
+        o.x = S2X(cx + cw / 2.0) - o.w / 2.0;
+        o.y = S2Y(cy + ch / 2.0) - o.h / 2.0;
+    }
 
     SnapUndo();
     o.id = g_nextId++;
@@ -436,23 +481,25 @@ void InsertImage(HWND hwnd) {
 }
 
 // ------------------------------------------------------------------ 导出 PNG
-// 按内容包围盒自动裁切，四周留 30 像素白边；网格不参与导出
-void ExportPNG(HWND hwnd) {
-    if (g_objs.empty()) {
-        MessageBoxW(hwnd, L"画布为空，无需导出。", L"导出 PNG", MB_OK | MB_ICONINFORMATION);
+// 导出给定世界坐标矩形这块区域为 PNG（1:1 像素，四周留 margin 个世界像素的白边）。
+// 区域之外的图形不会被画进来 —— GDI+ 的绘制天然被位图边界裁掉。
+// 全画布导出与"适应某个方框导出"共用这一个函数，保证两边行为一致。
+void ExportPNGBounds(HWND hwnd, double x0, double y0, double x1, double y1,
+                     double margin, const wchar_t* defName) {
+    if (x1 - x0 < 1.0 || y1 - y0 < 1.0) {
+        MessageBoxW(hwnd, L"待导出的区域为空。", L"导出 PNG", MB_OK | MB_ICONINFORMATION);
         return;
     }
-    wstring path = g_file;
-    if (!path.empty()) {
-        size_t d = path.find_last_of(L"\\/");
-        path = (d == wstring::npos ? path : path.substr(0, d + 1)) + L"export.png";
+    wstring path;
+    if (!g_file.empty()) {                              // 默认放在当前存档旁边
+        size_t d = g_file.find_last_of(L"\\/");
+        path = (d == wstring::npos ? wstring() : g_file.substr(0, d + 1)) + defName;
+    } else {
+        path = defName;
     }
     if (!PickFile(hwnd, path, true, L"PNG 图片\0*.png\0", L"png")) return;
 
-    double x0, y0, x1, y1;
-    ContentBounds(x0, y0, x1, y1);
-    double m = 30.0;
-    int W = (int)ceil(x1 - x0 + 2 * m), H = (int)ceil(y1 - y0 + 2 * m);
+    int W = (int)ceil(x1 - x0 + 2 * margin), H = (int)ceil(y1 - y0 + 2 * margin);
     if (W <= 0 || H <= 0 || W > 20000 || H > 20000) {
         MessageBoxW(hwnd, L"内容尺寸过大，无法导出。", L"导出 PNG", MB_OK | MB_ICONERROR);
         return;
@@ -462,7 +509,7 @@ void ExportPNG(HWND hwnd) {
         Gdiplus::Graphics g(&bmp);
         g.Clear(Gdiplus::Color(255, 255, 255, 255));
         double os = g_scale, opx = g_panX, opy = g_panY;   // 临时改成 1:1 铺满
-        g_scale = 1.0; g_panX = -x0 + m; g_panY = -y0 + m;
+        g_scale = 1.0; g_panX = -x0 + margin; g_panY = -y0 + margin;
         DrawScene(g);
         g_scale = os; g_panX = opx; g_panY = opy;
     }
@@ -475,6 +522,17 @@ void ExportPNG(HWND hwnd) {
         MessageBoxW(hwnd, L"导出失败。", L"导出 PNG", MB_OK | MB_ICONERROR);
     else
         MessageBoxW(hwnd, L"已导出 PNG。", L"导出 PNG", MB_OK | MB_ICONINFORMATION);
+}
+
+// 整个画布导出：按内容包围盒自动裁切，四周留 30 像素白边；网格不参与导出
+void ExportPNG(HWND hwnd) {
+    if (g_objs.empty()) {
+        MessageBoxW(hwnd, L"画布为空，无需导出。", L"导出 PNG", MB_OK | MB_ICONINFORMATION);
+        return;
+    }
+    double x0, y0, x1, y1;
+    ContentBounds(x0, y0, x1, y1);
+    ExportPNGBounds(hwnd, x0, y0, x1, y1, 30.0, L"export.png");
 }
 
 // ------------------------------------------------------------ 剪贴板粘贴
@@ -560,10 +618,15 @@ void DoPaste() {
     CommitEdit();
     if (!OpenClipboard(g_hwnd)) return;
 
-    // 落点：鼠标在画布上就贴光标处，否则贴视口中心
-    RECT rc; GetClientRect(g_hwnd, &rc);
-    double cx = g_mouseIn ? g_mwx : S2X((rc.right - rc.left) / 2.0);
-    double cy = g_mouseIn ? g_mwy : S2Y(g_tbH + (rc.bottom - rc.top - g_tbH) / 2.0);
+    // 落点：鼠标在画布上就贴光标处，否则贴画布中心
+    double cx = g_mwx, cy = g_mwy;
+    {
+        int vx, vy, vw, vh;
+        if (!g_mouseIn && CanvasRect(g_hwnd, vx, vy, vw, vh)) {
+            cx = S2X(vx + vw / 2.0);
+            cy = S2Y(vy + vh / 2.0);
+        }
+    }
 
     bool done = false;
     vector<BYTE> png;

@@ -116,27 +116,27 @@ void DrawScene(Gdiplus::Graphics& g) {
 }
 
 // ---------------------------------------------------------------------- 网格
-// 屏幕坐标绘制，步长随缩放自适应（保持屏幕上 20~80 像素一格）；不参与 PNG 导出
+// 屏幕坐标绘制，步长随缩放自适应（保持屏幕上 20~80 像素一格）；只铺满画布区，不参与 PNG 导出
 void DrawGrid(Gdiplus::Graphics& g, int W, int H) {
     if (!g_grid) return;
     double step = 10.0;
     for (int i = 0; i < 40 && step * g_scale < 20.0; ++i) step *= 2.0;
     for (int i = 0; i < 40 && step * g_scale > 80.0; ++i) step /= 2.0;
 
-    double sx0 = std::floor(S2X(0) / step) * step, sx1 = std::ceil(S2X(W) / step) * step;
-    double sy0 = std::floor(S2Y(g_tbH) / step) * step, sy1 = std::ceil(S2Y(H) / step) * step;
+    double sx0 = std::floor(S2X(g_cvX) / step) * step, sx1 = std::ceil(S2X(W) / step) * step;
+    double sy0 = std::floor(S2Y(g_cvY) / step) * step, sy1 = std::ceil(S2Y(H) / step) * step;
     Gdiplus::Pen minor(Gdiplus::Color(60, 120, 140, 165), 1.0f);
     Gdiplus::Pen major(Gdiplus::Color(100, 95, 120, 150), 1.0f);
 
     int k = 0;
     for (double wx = sx0; wx <= sx1; wx += step, ++k) {
         float sxx = (float)W2X(wx) + 0.5f;              // +0.5 让 1px 线不虚
-        g.DrawLine((k % 5 == 0) ? &major : &minor, sxx, (float)g_tbH, sxx, (float)H);
+        g.DrawLine((k % 5 == 0) ? &major : &minor, sxx, (float)g_cvY, sxx, (float)H);
     }
     k = 0;
     for (double wy = sy0; wy <= sy1; wy += step, ++k) {
         float syy = (float)W2Y(wy) + 0.5f;
-        g.DrawLine((k % 5 == 0) ? &major : &minor, 0.0f, syy, (float)W, syy);
+        g.DrawLine((k % 5 == 0) ? &major : &minor, (float)g_cvX, syy, (float)W, syy);
     }
 }
 
@@ -282,20 +282,32 @@ void DrawOverlay(Gdiplus::Graphics& g) {
 }
 
 // ------------------------------------------------------------ 顶部栏目与功能区
-// 画两层：深色顶栏（程序名 + 当前文件名）与浅色功能区（分组底板 + 组名）。
+// 画三层：深色顶栏（程序名 + 版本 + 当前文件名）、浅色功能区底板、分组底板与组名。
+// 功能区有两种排布：横排（顶栏下一条）与竖排（左侧一列），由 g_tbVert 决定。
 // 按钮本身是自绘子窗口，由 WM_DRAWITEM 单独绘制，会盖在本函数画的底板之上。
-void DrawChrome(Gdiplus::Graphics& g, int W) {
+void DrawChrome(Gdiplus::Graphics& g, int W, int H) {
     Gdiplus::SolidBrush band(Gdiplus::Color(255, 47, 59, 76));
     g.FillRectangle(&band, Gdiplus::RectF(0, 0, (Gdiplus::REAL)W, (Gdiplus::REAL)g_bandH));
 
     Gdiplus::Font tf(FONT_NAME, (Gdiplus::REAL)(13.0 * g_dpiScale),
                      Gdiplus::FontStyleBold, Gdiplus::UnitPixel);
-    Gdiplus::RectF tr((Gdiplus::REAL)(12 * g_dpiScale), 0,
-                      (Gdiplus::REAL)(160 * g_dpiScale), (Gdiplus::REAL)g_bandH);
+    Gdiplus::SolidBrush tw(Gdiplus::Color(255, 255, 255, 255));
     Gdiplus::StringFormat lsf;
     lsf.SetLineAlignment(Gdiplus::StringAlignmentCenter);
-    Gdiplus::SolidBrush tw(Gdiplus::Color(255, 255, 255, 255));
+    Gdiplus::RectF tr((Gdiplus::REAL)(12 * g_dpiScale), 0,
+                      (Gdiplus::REAL)(400 * g_dpiScale), (Gdiplus::REAL)g_bandH);
     g.DrawString(APP_NAME, -1, &tf, tr, &lsf, &tw);
+
+    // 版本号紧跟程序名后面：量一次实际宽度再定位，避免不同字体/DPI 下错位
+    Gdiplus::RectF mb;
+    g.MeasureString(APP_NAME, -1, &tf,
+                    Gdiplus::RectF(0, 0, (Gdiplus::REAL)W, (Gdiplus::REAL)g_bandH), &mb);
+    Gdiplus::Font vf(FONT_NAME, (Gdiplus::REAL)(10.0 * g_dpiScale),
+                     Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
+    Gdiplus::SolidBrush vw(Gdiplus::Color(190, 176, 190, 214));
+    Gdiplus::RectF vr((Gdiplus::REAL)(12 * g_dpiScale + mb.Width + 6 * g_dpiScale), 0,
+                      (Gdiplus::REAL)(140 * g_dpiScale), (Gdiplus::REAL)g_bandH);
+    g.DrawString(APP_VER, -1, &vf, vr, &lsf, &vw);
 
     wstring right = g_file.empty() ? L"未命名"
                   : g_file.substr(g_file.find_last_of(L"\\/") == wstring::npos
@@ -308,27 +320,52 @@ void DrawChrome(Gdiplus::Graphics& g, int W) {
     Gdiplus::RectF rr(0, 0, (Gdiplus::REAL)(W - 14 * g_dpiScale), (Gdiplus::REAL)g_bandH);
     g.DrawString(right.c_str(), -1, &tf, rr, &rsf, &sw);
 
+    // ---- 功能区底板 ----
     Gdiplus::SolidBrush rib(Gdiplus::Color(255, 243, 244, 246));
-    g.FillRectangle(&rib, Gdiplus::RectF(0, (Gdiplus::REAL)g_bandH, (Gdiplus::REAL)W, (Gdiplus::REAL)g_ribH));
+    if (!g_tbVert) {
+        g.FillRectangle(&rib, Gdiplus::RectF(0, (Gdiplus::REAL)g_bandH,
+                                             (Gdiplus::REAL)W, (Gdiplus::REAL)g_ribH));
+    } else {
+        g.FillRectangle(&rib, Gdiplus::RectF(0, (Gdiplus::REAL)g_bandH,
+                                             (Gdiplus::REAL)g_ribW,
+                                             (Gdiplus::REAL)(H - g_bandH)));
+        // 竖排时在右边缘画一条分隔线，和画布区分开
+        Gdiplus::Pen edge(Gdiplus::Color(255, 214, 218, 226), 1.0f);
+        g.DrawLine(&edge, (Gdiplus::REAL)(g_ribW - 1), (Gdiplus::REAL)g_bandH,
+                           (Gdiplus::REAL)(g_ribW - 1), (Gdiplus::REAL)H);
+    }
 
+    // ---- 分组底板与组名 ----
     for (int gi = 0; gi < NGROUP; ++gi) {
         int rgb = GROUPS[gi].rgb;
         BYTE r = (BYTE)((rgb >> 16) & 255), gg = (BYTE)((rgb >> 8) & 255), b = (BYTE)(rgb & 255);
         Gdiplus::SolidBrush pb(Gdiplus::Color(22, r, gg, b));      // 极淡的分组底板
-        g.FillRectangle(&pb, Gdiplus::RectF((Gdiplus::REAL)g_gx0[gi],
-                                            (Gdiplus::REAL)(g_bandH + 3 * g_dpiScale),
-                                            (Gdiplus::REAL)(g_gx1[gi] - g_gx0[gi]),
-                                            (Gdiplus::REAL)(g_ribH - 6 * g_dpiScale)));
         Gdiplus::Font lf(FONT_NAME, (Gdiplus::REAL)(10.5 * g_dpiScale),
                          Gdiplus::FontStyleRegular, Gdiplus::UnitPixel);
         Gdiplus::SolidBrush lb(Gdiplus::Color(255, (BYTE)(r * 0.8), (BYTE)(gg * 0.8), (BYTE)(b * 0.8)));
         Gdiplus::StringFormat csf;
         csf.SetAlignment(Gdiplus::StringAlignmentCenter);
-        Gdiplus::RectF lr((Gdiplus::REAL)g_gx0[gi],
-                          (Gdiplus::REAL)(g_bandH + 36 * g_dpiScale),
-                          (Gdiplus::REAL)(g_gx1[gi] - g_gx0[gi]),
-                          (Gdiplus::REAL)(16 * g_dpiScale));
-        g.DrawString(GROUPS[gi].label, -1, &lf, lr, &csf, &lb);
+
+        if (!g_tbVert) {
+            g.FillRectangle(&pb, Gdiplus::RectF((Gdiplus::REAL)g_gx0[gi],
+                                                (Gdiplus::REAL)(g_bandH + 3 * g_dpiScale),
+                                                (Gdiplus::REAL)(g_gx1[gi] - g_gx0[gi]),
+                                                (Gdiplus::REAL)(g_ribH - 6 * g_dpiScale)));
+            Gdiplus::RectF lr((Gdiplus::REAL)g_gx0[gi],
+                              (Gdiplus::REAL)(g_bandH + 36 * g_dpiScale),
+                              (Gdiplus::REAL)(g_gx1[gi] - g_gx0[gi]),
+                              (Gdiplus::REAL)(16 * g_dpiScale));
+            g.DrawString(GROUPS[gi].label, -1, &lf, lr, &csf, &lb);
+        } else {
+            double lh = (double)g_vLblH;
+            g.FillRectangle(&pb, Gdiplus::RectF((Gdiplus::REAL)(3 * g_dpiScale),
+                                                (Gdiplus::REAL)g_gy0[gi],
+                                                (Gdiplus::REAL)(g_ribW - 6 * g_dpiScale),
+                                                (Gdiplus::REAL)(g_gy1[gi] - g_gy0[gi])));
+            Gdiplus::RectF lr((Gdiplus::REAL)(6 * g_dpiScale), (Gdiplus::REAL)g_gy0[gi],
+                              (Gdiplus::REAL)(g_ribW - 12 * g_dpiScale), (Gdiplus::REAL)lh);
+            g.DrawString(GROUPS[gi].label, -1, &lf, lr, &csf, &lb);   // 竖排：标题居中在组首
+        }
     }
 }
 
@@ -337,7 +374,7 @@ const BtnDef* FindBtn(int id) {
     for (int i = 0; i < NBTN; ++i) if (BTNS[i].id == id) return &BTNS[i];
     return nullptr;
 }
-// 按钮的"选中态"：当前工具 / 空白拖动模式 / 网格开关
+// 按钮的"选中态"：当前工具 / 空白拖动模式 / 网格开关 / 置顶
 bool IsBtnChecked(int id) {
     switch (id) {
     case IDB_SELECT:  return g_tool == Tool::Select;
@@ -347,34 +384,120 @@ bool IsBtnChecked(int id) {
     case IDB_PANMODE: return g_emptyMode == 1;
     case IDB_SELMODE: return g_emptyMode == 0;
     case IDB_GRID:    return g_grid;
+    case IDB_TOPMOST: return g_topmost;
     }
     return false;
 }
-// 重绘所有按钮。注意：对父窗口 InvalidateRect 不会重绘子窗口，必须逐个按钮来
+// 重绘所有按钮。注意：对父窗口 InvalidateRect 不会重绘子窗口，必须逐个按钮来。
+// 顺带刷新"横排/竖排"按钮的标题 —— 它显示的是"点一下会变成什么"。
 void RefreshButtons() {
     for (int i = 0; i < NBTN; ++i) {
         HWND h = GetDlgItem(g_hwnd, BTNS[i].id);
-        if (h) InvalidateRect(h, nullptr, FALSE);
+        if (!h) continue;
+        if (BTNS[i].id == IDB_TBV) SetWindowTextW(h, g_tbVert ? L"横排" : L"竖排");
+        InvalidateRect(h, nullptr, FALSE);
     }
 }
-// 按 BTNS 表依次摆放自绘按钮（BS_OWNERDRAW），并记下每组的横向范围供 DrawChrome 使用
+
+// 创建全部自绘按钮（BS_OWNERDRAW）。只建一次，位置交给 LayoutToolbar。
 void MakeToolbar(HWND hwnd) {
-    int pad  = (int)(8 * g_dpiScale);
-    int gap  = (int)(3 * g_dpiScale);
-    int ggap = (int)(16 * g_dpiScale);
-    int bh   = (int)(28 * g_dpiScale);
-    int by   = g_bandH + (int)(6 * g_dpiScale);
-    int x = pad;
-    for (int gi = 0; gi < NGROUP; ++gi) {
-        g_gx0[gi] = x - (int)(5 * g_dpiScale);
-        for (int i = 0; i < NBTN; ++i) {
-            if (BTNS[i].grp != gi) continue;
-            int bw = (int)(BTNS[i].w * g_dpiScale);
-            CreateWindowW(L"BUTTON", BTNS[i].cap, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                          x, by, bw, bh, hwnd, (HMENU)(INT_PTR)BTNS[i].id, g_inst, nullptr);
-            x += bw + gap;
-        }
-        g_gx1[gi] = x - gap + (int)(5 * g_dpiScale);
-        x += ggap;
+    for (int i = 0; i < NBTN; ++i) {
+        if (GetDlgItem(hwnd, BTNS[i].id)) continue;
+        CreateWindowW(L"BUTTON", BTNS[i].cap, WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                      0, 0, 10, 10, hwnd, (HMENU)(INT_PTR)BTNS[i].id, g_inst, nullptr);
     }
+    LayoutToolbar(hwnd);
+}
+
+// 按当前方向摆放按钮，并算出分组底板范围与画布区原点。
+// 窗口大小变化时也要调用（竖排时按钮高度会随可用高度自动收缩，尽量都塞得下）。
+void LayoutToolbar(HWND hwnd) {
+    if (!hwnd) return;
+    RECT rc{}; GetClientRect(hwnd, &rc);
+    const int H = rc.bottom;
+    auto S = [](double v) { return (int)lround(v * g_dpiScale); };
+
+    if (!g_tbVert) {
+        // ------------------------------------------------ 横排：顶栏下面一整条
+        int pad = S(8), gap = S(3), ggap = S(16), bh = S(TB_BTN_H);
+        // 窗口不够宽时，先把按钮宽度和间距一起等比压窄（最多压到 TB_HSHRINK），
+        // 这样"窗口略小"不会立刻把后面几组按钮挤到窗口外；再窄就只能改用竖排了。
+        int need = 2 * pad + (NGROUP - 1) * ggap;
+        for (int i = 0; i < NBTN; ++i) need += S(BTNS[i].w) + gap;
+        double k = 1.0;
+        if (rc.right > 0 && need > rc.right) k = std::max(TB_HSHRINK, (double)rc.right / need);
+        auto SK = [&](int v) { return (int)lround(v * k); };
+
+        int p2 = SK(pad), gap2 = SK(gap), ggap2 = SK(ggap);
+        int by = g_bandH + S(6);
+        int x = p2;
+        for (int gi = 0; gi < NGROUP; ++gi) {
+            g_gx0[gi] = x - SK(S(5));
+            for (int i = 0; i < NBTN; ++i) {
+                if (BTNS[i].grp != gi) continue;
+                int bw = SK(S(BTNS[i].w));
+                if (HWND h = GetDlgItem(hwnd, BTNS[i].id)) MoveWindow(h, x, by, bw, bh, TRUE);
+                x += bw + gap2;
+            }
+            g_gx1[gi] = x - gap2 + SK(S(5));
+            x += ggap2;
+        }
+        g_cvX = 0;
+        g_cvY = g_bandH + g_ribH;
+    } else {
+        // ------------------------------------------------ 竖排：左侧一列
+        // 20 个按钮一列排下来，高度是唯一要操心的事：按客户的可用高度反推按钮高度，
+        // 装不下就先换"紧凑间距"，再不够就把按钮压到下限（此时最下面的按钮会被窗口裁掉）。
+        int bw0 = S(6);                                   // 左右内边距
+        int bw = g_ribW - 2 * bw0;
+        if (bw < S(30)) bw = S(30);
+        int avail = H - g_bandH - S(6) - S(8);
+
+        struct Lay { int lblH, lblGap, gap, ggap, bh; };
+        Lay lay{};
+        auto tryMode = [&](bool compact, Lay& out) -> bool {
+            out.lblH  = compact ? S(12) : S(TB_VLBL_H);
+            out.lblGap = compact ? 0 : S(3);
+            out.gap   = compact ? S(1) : S(2);
+            out.ggap  = compact ? S(4) : S(7);
+            int fix = NGROUP * (out.lblH + out.lblGap)
+                    + (NBTN - NGROUP) * out.gap + (NGROUP - 1) * out.ggap;
+            int bh = (int)((avail - fix) / (double)NBTN);
+            if (bh > S(TB_VMAX_H)) bh = S(TB_VMAX_H);
+            out.bh = bh;
+            return bh >= S(TB_VMIN_H);
+        };
+        if (!tryMode(false, lay)) { Lay compact{}; tryMode(true, compact); lay = compact; }
+        if (lay.bh < S(TB_VMIN_H)) lay.bh = S(TB_VMIN_H);
+
+        int y = g_bandH + S(6);
+        for (int gi = 0; gi < NGROUP; ++gi) {
+            g_gy0[gi] = y;
+            y += lay.lblH + lay.lblGap;                   // 组名占一行
+            for (int i = 0; i < NBTN; ++i) {
+                if (BTNS[i].grp != gi) continue;
+                if (HWND h = GetDlgItem(hwnd, BTNS[i].id)) MoveWindow(h, bw0, y, bw, lay.bh, TRUE);
+                y += lay.bh + lay.gap;
+            }
+            g_gy1[gi] = y - lay.gap;
+            y += lay.ggap;
+        }
+        g_cvX = g_ribW;
+        g_cvY = g_bandH;
+        // 组名行高随紧凑模式变化，DrawChrome 要跟着用同一个值
+        g_vLblH = lay.lblH;
+    }
+
+    HWND hv = GetDlgItem(hwnd, IDB_TBV);
+    if (hv) SetWindowTextW(hv, g_tbVert ? L"横排" : L"竖排");
+}
+
+// 切换功能区排布。按钮不重建，只重新摆放 + 重绘，所以切换是瞬时的。
+void SetToolbarVert(HWND hwnd, bool vert) {
+    if (g_tbVert == vert) return;
+    CommitEdit();
+    g_tbVert = vert;
+    LayoutToolbar(hwnd);
+    RefreshButtons();
+    InvalidateRect(hwnd, nullptr, FALSE);
 }

@@ -14,13 +14,21 @@
 
 // ------------------------------------------------------------------ 标题栏
 void UpdateTitle() {
-    wstring t = APP_NAME;
+    wstring t = wstring(APP_NAME) + L" " + APP_VER;
     if (!g_file.empty()) {
         size_t d = g_file.find_last_of(L"\\/");
         t += L" — " + (d == wstring::npos ? g_file : g_file.substr(d + 1));
     }
     if (g_dirty) t += L" *";
     SetWindowTextW(g_hwnd, t.c_str());
+}
+
+// -------------------------------------------------------------- 窗口总是置顶
+void ToggleTopmost(HWND hwnd) {
+    g_topmost = !g_topmost;
+    SetWindowPos(hwnd, g_topmost ? HWND_TOPMOST : HWND_NOTOPMOST, 0, 0, 0, 0,
+                 SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    RefreshButtons();                    // 按钮的选中态要跟着变
 }
 
 void MarkTool(Tool t) {
@@ -202,7 +210,7 @@ static void ShowInputBox(int kind, double cur) {
 // ------------------------------------------------------------- 右键上下文菜单
 // 按选中集合动态组装：统计各类对象数量，只显示对当前选择有意义的项
 void ShowContextMenu(HWND hwnd, int sx, int sy) {
-    if (sy < g_tbH) return;
+    if (sx < g_cvX || sy < g_cvY) return;
     double wx = S2X(sx), wy = S2Y(sy);
 
     int hit = HitTest(wx, wy);
@@ -211,11 +219,13 @@ void ShowContextMenu(HWND hwnd, int sx, int sy) {
 
     int nSel = (int)g_sels.size();
     int nText = 0, nArrow = 0, nBox = 0;
+    bool allBox = (nSel > 0);                      // 选中的是否清一色是"方框类"（含文本/图片）
     for (int sid : g_sels) {
         if (Obj* o = ObjOf(sid)) {
             if (o->type == OT::Text) ++nText;
             else if (o->type == OT::Arrow) ++nArrow;
             if (o->type != OT::Image) ++nBox;
+            if (o->type == OT::Arrow) allBox = false;
         }
     }
     Obj* prim = ObjOf(PrimaryId());
@@ -284,12 +294,29 @@ void ShowContextMenu(HWND hwnd, int sx, int sy) {
         if (nSel == 1 && prim->type == OT::Image)
             AppendMenuW(m, MF_STRING, IDM_IMG_ORIG, L"按原始像素显示");
 
+        // —— 只关心某个局部区域时用：把视图缩放到刚好容纳它，或只把它导出成图片 ——
+        if (allBox) {
+            bool oneRect = (nSel == 1 && prim->type == OT::Rect);
+            AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(m, MF_STRING, IDM_FITOBJ,
+                        oneRect ? L"适应到方框"
+                                : (nSel == 1 ? L"适应到此对象" : L"适应到选区"));
+            AppendMenuW(m, MF_STRING, IDM_EXPFITOBJ,
+                        oneRect ? L"适应方框导出图片…"
+                                : (nSel == 1 ? L"适应对象导出图片…" : L"适应选区导出图片…"));
+        }
+
         AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(m, MF_STRING, IDM_DELOBJ, (nSel > 1) ? L"删除选中对象" : L"删除此对象");
     } else {                                           // —— 点空白处：画布菜单 ——
         AppendMenuW(m, MF_STRING, IDM_HOME, L"回到原点");
         AppendMenuW(m, MF_STRING, IDM_FIT2, L"适应窗口");
         AppendMenuW(m, MF_STRING | (g_grid ? MF_CHECKED : 0), IDM_GRIDM, L"显示网格");
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(m, MF_STRING | (g_topmost ? MF_CHECKED : 0), IDM_TOPM, L"窗口总是置顶");
+        AppendMenuW(m, MF_STRING, IDM_TBVM, g_tbVert ? L"按钮栏改为横排" : L"按钮栏改为竖排");
+        AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(m, MF_STRING, IDM_NEWDOC, L"新建空白草稿纸");
     }
 
     TrackPopupMenu(m, TPM_LEFTALIGN | TPM_RIGHTBUTTON, pt.x, pt.y, 0, hwnd, nullptr);
@@ -309,6 +336,25 @@ void ShowContextMenu(HWND hwnd, int sx, int sy) {
 void HandleMenu(int id) {
     CommitEdit();
     Obj* prim = ObjOf(PrimaryId());
+
+    // —— 这几条与"选中了什么"无关，先处理 ——
+    if (id == IDM_NEWDOC) { NewDoc(g_hwnd); return; }
+    if (id == IDM_TOPM)   { ToggleTopmost(g_hwnd); return; }
+    if (id == IDM_TBVM)   { SetToolbarVert(g_hwnd, !g_tbVert); return; }
+
+    // —— 适应到方框 / 适应方框导出图片 ——
+    if (id == IDM_FITOBJ || id == IDM_EXPFITOBJ) {
+        double a, b, c, d; bool ok;
+        SelBounds(a, b, c, d, ok);
+        if (!ok) return;
+        if (id == IDM_FITOBJ) {
+            ZoomToBounds(g_hwnd, a, b, c, d, 40.0);        // 四周留 40 px，不至于贴边
+        } else {
+            // 导出用 1:1 像素，留 16 px 白边；线宽已含在 SelBounds 里
+            ExportPNGBounds(g_hwnd, a, b, c, d, 16.0, L"region.png");
+        }
+        return;
+    }
 
     if (id >= IDM_SIZE_BASE && id < IDM_SIZE_BASE + 6) {
         if (!prim) return;
